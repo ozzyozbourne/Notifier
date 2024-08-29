@@ -1,64 +1,66 @@
 package main
 
 import (
-	"github.com/IBM/sarama"
+	"context"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"log"
+	"time"
 )
 
 func main() {
-
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
-	config.Producer.Retry.Max = 5
-	config.Producer.RequiredAcks = sarama.WaitForAll
-
 	brokersAddress := []string{"localhost:9192"}
 
-	//create a sync producer
-	producer, err := sarama.NewSyncProducer(brokersAddress, config)
+	// Kafka client configuration
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokersAddress...),
+		kgo.WithLogger(kgo.BasicLogger(log.Default().Writer(), kgo.LogLevelInfo, nil)),
+	)
 	if err != nil {
-		log.Fatalf("Failed to create producer -> \n%v\n", err)
+		log.Fatalf("Failed to create Kafka client -> \n%v\n", err)
 	}
-	defer producer.Close()
+	defer client.Close()
 
-	//create a admin client
-	admin, err := sarama.NewClusterAdmin(brokersAddress, config)
-	if err != nil {
-		log.Fatalf("Failed to create admin client -> \n%v\n", err)
-	}
-	defer admin.Close()
-	//create topic
+	// Create a Kafka admin client
+	adminClient := kadm.NewClient(client)
+	defer adminClient.Close()
+
+	// Create a topic
 	topic := "send-email"
-	printTopicList(admin)
-	createTopic(admin, topic)
-	printTopicList(admin)
-	sendMessage(producer, topic, "test_key", "A test message from golang")
-
+	printTopicList(adminClient)
+	createTopic(adminClient, topic)
+	printTopicList(adminClient)
+	sendMessage(client, topic, "test_key", "A test message from golang")
 }
 
-func printTopicList(admin sarama.ClusterAdmin) {
-	topics, err := admin.ListTopics()
+func printTopicList(adminClient *kadm.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	topics, err := adminClient.ListTopics(ctx)
 	if err != nil {
 		log.Fatalf("Unable to fetch list of topics \n%v\n", err)
 	}
-	if topics != nil && len(topics) == 0 {
+	if len(topics) == 0 {
 		log.Printf("No available topic\n")
 	} else {
-		log.Printf("List of fetched topics ->\n%v\n", topics)
+		log.Printf("List of fetched topics ->\n")
+		for topic := range topics {
+			log.Printf("%s\n", topic)
+		}
 	}
 }
 
-func createTopic(admin sarama.ClusterAdmin, topicName string) {
-	topics, err := admin.ListTopics()
+func createTopic(adminClient *kadm.Client, topicName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	topics, err := adminClient.ListTopics(ctx)
 	if err != nil {
 		log.Fatalf("Unable to fetch list of topics \n%v\n", err)
 	}
 	if _, exists := topics[topicName]; !exists {
-		topicDetail := sarama.TopicDetail{
-			NumPartitions:     1,
-			ReplicationFactor: 1,
-		}
-		err = admin.CreateTopic(topicName, &topicDetail, false)
+		_, err = adminClient.CreateTopics(ctx, 1, 1, nil, topicName)
 		if err != nil {
 			log.Fatalf("Failed to create topic %s\n%v\v", topicName, err)
 		}
@@ -68,19 +70,19 @@ func createTopic(admin sarama.ClusterAdmin, topicName string) {
 	}
 }
 
-func sendMessage(producer sarama.SyncProducer, topic, key, message string) {
-	msg := &sarama.ProducerMessage{
-		Topic: topic,
-		Key:   sarama.StringEncoder(key),
-		Value: sarama.StringEncoder(message),
-	}
+func sendMessage(client *kgo.Client, topic, key, message string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	partition, offset, err := producer.SendMessage(msg)
+	record := &kgo.Record{
+		Topic: topic,
+		Key:   []byte(key),
+		Value: []byte(message),
+	}
+	err := client.ProduceSync(ctx, record).FirstErr()
 	if err != nil {
 		log.Fatalf("Failed to send message -> %s to topic %s\n", message, topic)
 	} else {
-		log.Printf("Message %s send to topic %s successfully\n", message, topic)
-		log.Printf("Partition value -> %v\n", partition)
-		log.Printf("Offset value -> %v\n", offset)
+		log.Printf("Message %s sent to topic %s successfully\n", message, topic)
 	}
 }
